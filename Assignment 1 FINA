@@ -1,0 +1,238 @@
+# %% [markdown]
+# # Homework Assignment: CAPM, Three-Factor Model, and Clustering using Python and Yahoo Finance API
+# **Date:** January 27, 2025
+#
+# This notebook performs the following analyses:
+#
+# 1. **CAPM Model:** Downloads daily data for AAPL and the S&P 500 index, computes excess returns (using a constant risk‐free rate of 2% annualized), estimates the CAPM beta via linear regression, and plots the regression line.
+#
+# 2. **Fama-French Three-Factor Model:** Downloads the Fama-French daily factors, merges them with AAPL’s data, estimates the three‐factor model, and prints regression coefficients and R-squared.
+#
+# 3. **Clustering Stocks:** Downloads adjusted close prices for 10 stocks, computes daily returns and summary statistics (mean, standard deviation, skewness, kurtosis), normalizes these features, clusters the stocks using k-means into 3 clusters, and visualizes the results.
+
+# %% [markdown]
+# ## Install Required Libraries
+# Run the commands below to install the required libraries. You can execute these cells only once.
+# Note: The `!pip install` commands ensure that yfinance (and others) are available.
+
+# %%
+!pip install yfinance
+!pip install pandas_datareader
+!pip install statsmodels
+!pip install scikit-learn
+!pip install scipy
+
+# %% [markdown]
+# ## Import Libraries
+
+# %%
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from scipy.stats import skew, kurtosis
+import datetime
+import requests, zipfile, io
+
+# %% [markdown]
+# ## Define Date Range
+#
+# We will download data for the past 3 years (relative to today).
+
+# %%
+end_date = datetime.datetime.today()
+start_date = end_date - datetime.timedelta(days=3*365)
+
+# %% [markdown]
+# ## Problem 1: CAPM Model
+#
+# **Steps:**
+#
+# 1. Download daily adjusted closing prices for AAPL and the S&P 500 index.
+# 2. Calculate daily returns and excess returns (using a constant 2% annualized risk‐free rate).
+# 3. Run a linear regression (CAPM) and report the beta, alpha, and R-squared.
+# 4. Plot the regression line and scatterplot.
+
+# %%
+# Download data for AAPL and S&P 500
+stock = yf.download("AAPL", start=start_date, end=end_date)
+market = yf.download("^GSPC", start=start_date, end=end_date)
+
+# Calculate daily returns using adjusted close prices
+stock['Return'] = stock['Adj Close'].pct_change()
+market['Return'] = market['Adj Close'].pct_change()
+
+# Assume a constant risk-free rate of 2% annualized; daily rate = 0.02/252
+rf_daily = 0.02 / 252
+
+# Compute daily excess returns for stock and market
+stock['Excess Return'] = stock['Return'] - rf_daily
+market['Excess Return'] = market['Return'] - rf_daily
+
+# Combine data into one DataFrame and drop missing values
+df = pd.concat([stock['Excess Return'], market['Excess Return']], axis=1).dropna()
+df.columns = ['Stock Excess Return', 'Market Excess Return']
+
+# Run linear regression: Stock Excess Return ~ Market Excess Return
+X = sm.add_constant(df['Market Excess Return'])
+y = df['Stock Excess Return']
+capm_model = sm.OLS(y, X).fit()
+
+# Display the regression summary
+print("CAPM Model Regression Results:")
+print(capm_model.summary())
+
+# Plot the data points and regression line
+plt.figure(figsize=(10, 6))
+plt.scatter(df['Market Excess Return'], df['Stock Excess Return'], alpha=0.5, label='Data Points')
+x_vals = np.linspace(df['Market Excess Return'].min(), df['Market Excess Return'].max(), 100)
+y_vals = capm_model.params[0] + capm_model.params[1] * x_vals
+plt.plot(x_vals, y_vals, color='red', label='Regression Line')
+plt.xlabel('Market Excess Return')
+plt.ylabel('Stock Excess Return')
+plt.title('CAPM: AAPL vs. Market Excess Returns')
+plt.legend()
+plt.show()
+
+# Analysis of CAPM regression results
+print("\nCAPM Analysis:")
+print(f"Alpha (Intercept): {capm_model.params[0]:.4f}")
+print(f"Beta (Slope): {capm_model.params[1]:.4f}")
+print(f"R-squared: {capm_model.rsquared:.4f}")
+if capm_model.params[1] > 1:
+    print("Interpretation: AAPL is more volatile than the market.")
+else:
+    print("Interpretation: AAPL is less volatile than the market.")
+
+# %% [markdown]
+# ## Problem 2: Fama-French Three-Factor Model
+#
+# **Steps:**
+#
+# 1. Download the Fama-French daily factors from Kenneth French’s website.
+# 2. Merge these factors with AAPL’s daily returns.
+# 3. Estimate the three-factor model (Excess Return ~ Mkt-RF + SMB + HML) using multiple regression.
+# 4. Report the coefficients, alpha, and R-squared.
+
+# %%
+# Download Fama-French daily factors (zip file) from Kenneth French's website
+ff_url = "http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip"
+response = requests.get(ff_url)
+z = zipfile.ZipFile(io.BytesIO(response.content))
+# Identify the CSV file in the zip archive
+csv_filename = [f for f in z.namelist() if f.lower().endswith('.csv')][0]
+print("Extracting file:", csv_filename)
+
+# Read the CSV file; skip the initial header rows that are not part of the data
+ff_df = pd.read_csv(z.open(csv_filename), skiprows=3)
+
+# Remove footer rows (which do not contain numeric dates)
+ff_df = ff_df[ff_df.iloc[:, 0].apply(lambda x: str(x).strip().isdigit())]
+ff_df.rename(columns={ff_df.columns[0]: 'Date'}, inplace=True)
+ff_df['Date'] = pd.to_datetime(ff_df['Date'], format='%Y%m%d')
+
+# Convert factor columns from percentages to decimals (divide by 100)
+for col in ['Mkt-RF', 'SMB', 'HML', 'RF']:
+    ff_df[col] = pd.to_numeric(ff_df[col], errors='coerce') / 100
+
+# Filter the Fama-French data to our date range and set Date as index
+ff_df = ff_df[(ff_df['Date'] >= start_date) & (ff_df['Date'] <= end_date)]
+ff_df.set_index('Date', inplace=True)
+
+# Download AAPL data (again) for consistency and compute returns
+aapl = yf.download("AAPL", start=start_date, end=end_date)
+aapl['Return'] = aapl['Adj Close'].pct_change()
+aapl.index = pd.to_datetime(aapl.index)
+
+# Merge AAPL returns with Fama-French factors
+merged_df = pd.merge(aapl[['Return']], ff_df, left_index=True, right_index=True, how='inner')
+
+# Calculate AAPL's excess returns using the Fama-French risk-free rate (RF)
+merged_df['Excess Return'] = merged_df['Return'] - merged_df['RF']
+
+# Define independent variables (the factors) and add a constant
+X_ff = merged_df[['Mkt-RF', 'SMB', 'HML']]
+X_ff = sm.add_constant(X_ff)
+y_ff = merged_df['Excess Return']
+
+# Run the multiple regression for the three-factor model
+ff_model = sm.OLS(y_ff, X_ff).fit()
+
+# Display the regression summary
+print("\nFama-French Three-Factor Model Regression Results:")
+print(ff_model.summary())
+
+# Analysis of Fama-French model results
+print("\nFama-French Analysis:")
+print("Coefficients:")
+print(ff_model.params)
+print(f"R-squared: {ff_model.rsquared:.4f}")
+
+# %% [markdown]
+# ## Problem 3: Clustering Stocks
+#
+# **Steps:**
+#
+# 1. Select 10 stocks from different sectors.
+# 2. Download daily adjusted closing prices for the past 3 years.
+# 3. Compute daily returns and summary statistics (mean return, standard deviation, skewness, kurtosis) for each stock.
+# 4. Normalize these statistics.
+# 5. Use k-means clustering (with 3 clusters) to group the stocks.
+# 6. Plot the clusters (mean return vs. standard deviation) with different colors.
+
+# %%
+# Define list of 10 stocks from different sectors
+stocks = ["AAPL", "MSFT", "AMZN", "TSLA", "JPM", "PFE", "KO", "XOM", "NVDA", "META"]
+
+# Download daily adjusted closing prices for all stocks
+data = yf.download(stocks, start=start_date, end=end_date)['Adj Close']
+
+# Calculate daily returns for each stock
+returns = data.pct_change().dropna()
+
+# Compute summary statistics for each stock
+stats_df = pd.DataFrame(index=stocks, columns=['Mean Return', 'Std Dev', 'Skewness', 'Kurtosis'])
+for stock in stocks:
+    stats_df.loc[stock, 'Mean Return'] = returns[stock].mean()
+    stats_df.loc[stock, 'Std Dev'] = returns[stock].std()
+    stats_df.loc[stock, 'Skewness'] = skew(returns[stock])
+    stats_df.loc[stock, 'Kurtosis'] = kurtosis(returns[stock])
+stats_df = stats_df.astype(float)
+print("\nSummary Statistics for Stocks:")
+print(stats_df)
+
+# Normalize the summary statistics
+scaler = StandardScaler()
+stats_normalized = scaler.fit_transform(stats_df)
+
+# Use k-means clustering to group stocks into 3 clusters
+kmeans = KMeans(n_clusters=3, random_state=42)
+clusters = kmeans.fit_predict(stats_normalized)
+stats_df['Cluster'] = clusters
+print("\nClustering Results:")
+print(stats_df[['Cluster']])
+
+# Plot clusters using mean return vs. standard deviation
+plt.figure(figsize=(10, 6))
+colors = ['red', 'green', 'blue']
+for cluster in range(3):
+    cluster_data = stats_df[stats_df['Cluster'] == cluster]
+    plt.scatter(cluster_data['Std Dev'], cluster_data['Mean Return'],
+                color=colors[cluster], s=100, label=f'Cluster {cluster}')
+    # Label each stock on the plot
+    for stock in cluster_data.index:
+        plt.text(cluster_data.loc[stock, 'Std Dev'],
+                 cluster_data.loc[stock, 'Mean Return'],
+                 stock, fontsize=9)
+plt.xlabel('Standard Deviation of Returns')
+plt.ylabel('Mean Return')
+plt.title('Clustering of Stocks: Mean Return vs. Standard Deviation')
+plt.legend()
+plt.show()
+
+# Analysis of clustering results
+print("\nClustering Analysis:")
+print("The stocks have been grouped based on their return characteristics. Examine the clusters to see if stocks with similar volatility and average returns are grouped together.")
